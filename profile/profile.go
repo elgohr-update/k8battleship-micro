@@ -4,61 +4,53 @@
 package profile
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
-	"io/ioutil"
+	"os"
+	"path/filepath"
 
-	"github.com/micro/cli/v2"
-	"github.com/micro/go-micro/v3/auth/jwt"
-	"github.com/micro/go-micro/v3/auth/noop"
-	"github.com/micro/go-micro/v3/broker"
-	"github.com/micro/go-micro/v3/broker/http"
-	"github.com/micro/go-micro/v3/broker/nats"
-	"github.com/micro/go-micro/v3/client"
-	"github.com/micro/go-micro/v3/config"
-	evStore "github.com/micro/go-micro/v3/events/store"
-	memStream "github.com/micro/go-micro/v3/events/stream/memory"
-	natsStream "github.com/micro/go-micro/v3/events/stream/nats"
-	"github.com/micro/go-micro/v3/registry"
-	"github.com/micro/go-micro/v3/registry/etcd"
-	"github.com/micro/go-micro/v3/registry/mdns"
-	"github.com/micro/go-micro/v3/registry/memory"
-	"github.com/micro/go-micro/v3/router"
-	regRouter "github.com/micro/go-micro/v3/router/registry"
-	"github.com/micro/go-micro/v3/router/static"
-	"github.com/micro/go-micro/v3/runtime/kubernetes"
-	"github.com/micro/go-micro/v3/runtime/local"
-	"github.com/micro/go-micro/v3/server"
-	"github.com/micro/go-micro/v3/store"
-	"github.com/micro/go-micro/v3/store/cockroach"
-	"github.com/micro/go-micro/v3/store/file"
-	mem "github.com/micro/go-micro/v3/store/memory"
+	"github.com/micro/micro/v3/service/auth/jwt"
+	"github.com/micro/micro/v3/service/auth/noop"
+	"github.com/micro/micro/v3/service/broker"
+	memBroker "github.com/micro/micro/v3/service/broker/memory"
+	"github.com/micro/micro/v3/service/build/golang"
+	"github.com/micro/micro/v3/service/client"
+	"github.com/micro/micro/v3/service/config"
+	storeConfig "github.com/micro/micro/v3/service/config/store"
+	evStore "github.com/micro/micro/v3/service/events/store"
+	memStream "github.com/micro/micro/v3/service/events/stream/memory"
 	"github.com/micro/micro/v3/service/logger"
+	"github.com/micro/micro/v3/service/registry"
+	"github.com/micro/micro/v3/service/registry/mdns"
+	"github.com/micro/micro/v3/service/registry/memory"
+	"github.com/micro/micro/v3/service/router"
+	k8sRouter "github.com/micro/micro/v3/service/router/kubernetes"
+	regRouter "github.com/micro/micro/v3/service/router/registry"
+	"github.com/micro/micro/v3/service/runtime/kubernetes"
+	"github.com/micro/micro/v3/service/runtime/local"
+	"github.com/micro/micro/v3/service/server"
+	"github.com/micro/micro/v3/service/store/file"
+	mem "github.com/micro/micro/v3/service/store/memory"
+	"github.com/urfave/cli/v2"
 
 	inAuth "github.com/micro/micro/v3/internal/auth"
+	"github.com/micro/micro/v3/internal/user"
 	microAuth "github.com/micro/micro/v3/service/auth"
-	microBroker "github.com/micro/micro/v3/service/broker"
-	microClient "github.com/micro/micro/v3/service/client"
-	microConfig "github.com/micro/micro/v3/service/config"
+	microBuilder "github.com/micro/micro/v3/service/build"
 	microEvents "github.com/micro/micro/v3/service/events"
 	microRegistry "github.com/micro/micro/v3/service/registry"
 	microRouter "github.com/micro/micro/v3/service/router"
 	microRuntime "github.com/micro/micro/v3/service/runtime"
-	microServer "github.com/micro/micro/v3/service/server"
 	microStore "github.com/micro/micro/v3/service/store"
 )
 
 // profiles which when called will configure micro to run in that environment
 var profiles = map[string]*Profile{
 	// built in profiles
-	"ci":         CI,
+	"client":     Client,
+	"service":    Service,
 	"test":       Test,
 	"local":      Local,
 	"kubernetes": Kubernetes,
-	"platform":   Platform,
-	"client":     Client,
-	"service":    Service,
 }
 
 // Profile configures an environment
@@ -89,23 +81,6 @@ func Load(name string) (*Profile, error) {
 	return v, nil
 }
 
-// CI profile to use for CI tests
-var CI = &Profile{
-	Name: "ci",
-	Setup: func(ctx *cli.Context) error {
-		microAuth.DefaultAuth = jwt.NewAuth()
-		microRuntime.DefaultRuntime = local.NewRuntime()
-		microStore.DefaultStore = file.NewStore()
-		microConfig.DefaultConfig, _ = config.NewConfig()
-		microEvents.DefaultStream, _ = memStream.NewStream()
-		microEvents.DefaultStore = evStore.NewStore(evStore.WithStore(microStore.DefaultStore))
-		setBroker(http.NewBroker())
-		setRegistry(etcd.NewRegistry())
-		setupJWTRules()
-		return nil
-	},
-}
-
 // Client profile is for any entrypoint that behaves as a client
 var Client = &Profile{
 	Name:  "client",
@@ -116,62 +91,80 @@ var Client = &Profile{
 var Local = &Profile{
 	Name: "local",
 	Setup: func(ctx *cli.Context) error {
-		microAuth.DefaultAuth = noop.NewAuth()
+		microAuth.DefaultAuth = jwt.NewAuth()
+		microStore.DefaultStore = file.NewStore(file.WithDir(filepath.Join(user.Dir, "server", "store")))
+		SetupConfigSecretKey(ctx)
+		config.DefaultConfig, _ = storeConfig.NewConfig(microStore.DefaultStore, "")
+		SetupBroker(memBroker.NewBroker())
+		SetupRegistry(mdns.NewRegistry())
+		SetupJWT(ctx)
+
+		// use the local runtime, note: the local runtime is designed to run source code directly so
+		// the runtime builder should NOT be set when using this implementation
 		microRuntime.DefaultRuntime = local.NewRuntime()
-		microStore.DefaultStore = file.NewStore()
-		microConfig.DefaultConfig, _ = config.NewConfig()
-		setBroker(http.NewBroker())
-		setRegistry(mdns.NewRegistry())
-		setupJWTRules()
 
 		var err error
 		microEvents.DefaultStream, err = memStream.NewStream()
 		if err != nil {
 			logger.Fatalf("Error configuring stream: %v", err)
 		}
+		microEvents.DefaultStore = evStore.NewStore(
+			evStore.WithStore(microStore.DefaultStore),
+		)
+
+		microStore.DefaultBlobStore, err = file.NewBlobStore()
+		if err != nil {
+			logger.Fatalf("Error configuring file blob store: %v", err)
+		}
 
 		return nil
 	},
 }
 
-// Kubernetes profile to run on kubernetes
+// Kubernetes profile to run on kubernetes with zero deps. Designed for use with the micro helm chart
 var Kubernetes = &Profile{
 	Name: "kubernetes",
-	Setup: func(ctx *cli.Context) error {
-		// TODO: implement
-		// using a static router so queries are routed based on service name
-		microRouter.DefaultRouter = static.NewRouter()
-		// registry kubernetes
-		// config configmap
-		// store ...
+	Setup: func(ctx *cli.Context) (err error) {
 		microAuth.DefaultAuth = jwt.NewAuth()
-		setupJWTRules()
-		return nil
-	},
-}
+		SetupJWT(ctx)
 
-// Platform is for running the micro platform
-var Platform = &Profile{
-	Name: "platform",
-	Setup: func(ctx *cli.Context) error {
-		microAuth.DefaultAuth = jwt.NewAuth()
-		microConfig.DefaultConfig, _ = config.NewConfig()
 		microRuntime.DefaultRuntime = kubernetes.NewRuntime()
-		setBroker(nats.NewBroker(broker.Addrs("nats-cluster")))
-		setRegistry(etcd.NewRegistry(registry.Addrs("etcd-cluster")))
-		setupJWTRules()
+		microBuilder.DefaultBuilder, err = golang.NewBuilder()
+		if err != nil {
+			logger.Fatalf("Error configuring golang builder: %v", err)
+		}
 
-		var err error
-		microEvents.DefaultStream, err = natsStream.NewStream(natsStreamOpts(ctx)...)
+		microEvents.DefaultStream, err = memStream.NewStream()
 		if err != nil {
 			logger.Fatalf("Error configuring stream: %v", err)
 		}
 
-		// the cockroach store will connect immediately so the address must be passed
-		// when the store is created. The cockroach store address contains the location
-		// of certs so it can't be defaulted like the broker and registry.
-		microStore.DefaultStore = cockroach.NewStore(store.Nodes(ctx.String("store_address")))
-		microEvents.DefaultStore = evStore.NewStore(evStore.WithStore(microStore.DefaultStore))
+		microStore.DefaultStore = file.NewStore(file.WithDir("/store"))
+		microStore.DefaultBlobStore, err = file.NewBlobStore(file.WithDir("/store/blob"))
+		if err != nil {
+			logger.Fatalf("Error configuring file blob store: %v", err)
+		}
+
+		// the registry service uses the memory registry, the other core services will use the default
+		// rpc client and call the registry service
+		if ctx.Args().Get(1) == "registry" {
+			SetupRegistry(memory.NewRegistry())
+		}
+
+		// the broker service uses the memory broker, the other core services will use the default
+		// rpc client and call the broker service
+		if ctx.Args().Get(1) == "broker" {
+			SetupBroker(memBroker.NewBroker())
+		}
+
+		config.DefaultConfig, err = storeConfig.NewConfig(microStore.DefaultStore, "")
+		if err != nil {
+			logger.Fatalf("Error configuring config: %v", err)
+		}
+		SetupConfigSecretKey(ctx)
+
+		microRouter.DefaultRouter = k8sRouter.NewRouter()
+		client.DefaultClient.Init(client.Router(microRouter.DefaultRouter))
 		return nil
 	},
 }
@@ -188,26 +181,30 @@ var Test = &Profile{
 	Setup: func(ctx *cli.Context) error {
 		microAuth.DefaultAuth = noop.NewAuth()
 		microStore.DefaultStore = mem.NewStore()
-		microConfig.DefaultConfig, _ = config.NewConfig()
-		setRegistry(memory.NewRegistry())
+		microStore.DefaultBlobStore, _ = file.NewBlobStore()
+		config.DefaultConfig, _ = storeConfig.NewConfig(microStore.DefaultStore, "")
+		SetupRegistry(memory.NewRegistry())
 		return nil
 	},
 }
 
-func setRegistry(reg registry.Registry) {
+// SetupRegistry configures the registry
+func SetupRegistry(reg registry.Registry) {
 	microRegistry.DefaultRegistry = reg
 	microRouter.DefaultRouter = regRouter.NewRouter(router.Registry(reg))
-	microServer.DefaultServer.Init(server.Registry(reg))
-	microClient.DefaultClient.Init(client.Registry(reg))
+	client.DefaultClient.Init(client.Registry(reg))
+	server.DefaultServer.Init(server.Registry(reg))
 }
 
-func setBroker(b broker.Broker) {
-	microBroker.DefaultBroker = b
-	microClient.DefaultClient.Init(client.Broker(b))
-	microServer.DefaultServer.Init(server.Broker(b))
+// SetupBroker configures the broker
+func SetupBroker(b broker.Broker) {
+	broker.DefaultBroker = b
+	client.DefaultClient.Init(client.Broker(b))
+	server.DefaultServer.Init(server.Broker(b))
 }
 
-func setupJWTRules() {
+// SetupJWT configures the default internal system rules
+func SetupJWT(ctx *cli.Context) {
 	for _, rule := range inAuth.SystemRules {
 		if err := microAuth.DefaultAuth.Grant(rule); err != nil {
 			logger.Fatal("Error creating default rule: %v", err)
@@ -215,33 +212,13 @@ func setupJWTRules() {
 	}
 }
 
-// natsStreamOpts returns a slice of options which should be used to configure nats
-func natsStreamOpts(ctx *cli.Context) []natsStream.Option {
-	opts := []natsStream.Option{
-		natsStream.Address("nats://nats-cluster:4222"),
-		natsStream.ClusterID("nats-streaming-cluster"),
-	}
-
-	// Parse event TLS certs
-	if len(ctx.String("events_tls_cert")) > 0 || len(ctx.String("events_tls_key")) > 0 {
-		cert, err := tls.LoadX509KeyPair(ctx.String("events_tls_cert"), ctx.String("events_tls_key"))
+func SetupConfigSecretKey(ctx *cli.Context) {
+	key := ctx.String("config_secret_key")
+	if len(key) == 0 {
+		k, err := user.GetConfigSecretKey()
 		if err != nil {
-			logger.Fatalf("Error loading event TLS cert: %v", err)
+			logger.Fatal("Error getting config secret: %v", err)
 		}
-
-		// load custom certificate authority
-		caCertPool := x509.NewCertPool()
-		if len(ctx.String("events_tls_ca")) > 0 {
-			crt, err := ioutil.ReadFile(ctx.String("events_tls_ca"))
-			if err != nil {
-				logger.Fatalf("Error loading event TLS certificate authority: %v", err)
-			}
-			caCertPool.AppendCertsFromPEM(crt)
-		}
-
-		cfg := &tls.Config{Certificates: []tls.Certificate{cert}, RootCAs: caCertPool}
-		opts = append(opts, natsStream.TLSConfig(cfg))
+		os.Setenv("MICRO_CONFIG_SECRET_KEY", k)
 	}
-
-	return opts
 }

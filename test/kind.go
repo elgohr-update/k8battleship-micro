@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 )
 
@@ -16,10 +18,12 @@ func init() {
 	testFilter = []string{
 		"TestRunGithubSource",
 		"TestStore",
+		// @todo Reactivate this once source to running works in kind
+		// "TestStoreImpl",
 		"TestCorruptedTokenLogin",
 		"TestRunPrivateSource",
 		"TestEventsStream",
-		"TestIdiomaticFolderStructure",
+		"TestRPC",
 	}
 	maxTimeMultiplier = 3
 	isParallel = false // in theory should work in parallel
@@ -39,6 +43,13 @@ func newK8sServer(t *T, fname string, opts ...Option) Server {
 	portnum := rand.Intn(maxPort-minPort) + minPort
 	configFile := configFile(fname)
 
+	var cmd *exec.Cmd
+	if v := os.Getenv("IN_HELM_TEST"); len(v) > 0 {
+		cmd = exec.Command("kubectl", "port-forward", "--namespace", "micro", "svc/proxy", fmt.Sprintf("%d:443", portnum))
+	} else {
+		cmd = exec.Command("kubectl", "port-forward", "--namespace", "default", "svc/micro-proxy", fmt.Sprintf("%d:8081", portnum))
+	}
+
 	s := &testK8sServer{ServerBase{
 		dir:       filepath.Dir(configFile),
 		config:    configFile,
@@ -46,7 +57,7 @@ func newK8sServer(t *T, fname string, opts ...Option) Server {
 		env:       options.Namespace,
 		proxyPort: portnum,
 		opts:      options,
-		cmd:       exec.Command("kubectl", "port-forward", "--namespace", "default", "svc/micro-proxy", fmt.Sprintf("%d:443", portnum)),
+		cmd:       cmd,
 	}}
 	s.namespace = s.env
 
@@ -87,6 +98,10 @@ func (s *testK8sServer) Run() error {
 		return err
 	}
 
+	// generate account in new namespace
+	// ignore errors because it is not an idempotent call
+	s.Command().Exec("auth", "create", "account", "--secret", "micro", "--namespace", s.Env(), "admin")
+
 	// switch to the namespace
 	ChangeNamespace(s.Command(), s.Env(), s.Env())
 
@@ -102,4 +117,23 @@ func (s *testK8sServer) Close() {
 	s.ServerBase.Close()
 	// kill the port forward
 	s.cmd.Process.Kill()
+}
+
+func TestDeleteOwnAccount(t *testing.T) {
+	TrySuite(t, testDeleteOwnAccount, retryCount)
+}
+
+func testDeleteOwnAccount(t *T) {
+	t.Parallel()
+	serv := NewServer(t, WithLogin())
+	defer serv.Close()
+	if err := serv.Run(); err != nil {
+		return
+	}
+
+	cmd := serv.Command()
+	outp, err := cmd.Exec("auth", "delete", "account", "admin")
+	if err == nil {
+		t.Fatal(string(outp))
+	}
 }

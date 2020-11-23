@@ -6,8 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/micro/go-micro/v3/api/resolver"
-	goregistry "github.com/micro/go-micro/v3/registry"
+	// load the cmd package to load defaults since we're using a test profile without importing
+	// micro or service
+	_ "github.com/micro/micro/v3/cmd"
+
+	"github.com/micro/micro/v3/internal/api/resolver"
 	"github.com/micro/micro/v3/profile"
 	"github.com/micro/micro/v3/service/registry"
 	"github.com/micro/micro/v3/service/router"
@@ -60,15 +63,15 @@ func TestWebResolver(t *testing.T) {
 func runTests(t *testing.T, res *Resolver, testCases []testCase) {
 	for _, service := range testCases {
 		t.Run(service.Host+service.Path, func(t *testing.T) {
-			v := &goregistry.Service{
+			v := &registry.Service{
 				Name:    service.Service,
 				Version: "latest",
-				Nodes: []*goregistry.Node{
+				Nodes: []*registry.Node{
 					{Id: "1", Address: "127.0.0.1:8080"},
 				},
 			}
 
-			registry.Register(v)
+			registry.DefaultRegistry.Register(v)
 
 			// registry events are published to the router async (although if we don't wait the fallback should still kick in)
 			time.Sleep(time.Millisecond * 10)
@@ -89,7 +92,7 @@ func runTests(t *testing.T, res *Resolver, testCases []testCase) {
 				t.Fatalf("Failed to resolve %v", service.Host)
 			}
 
-			registry.Deregister(v)
+			registry.DefaultRegistry.Deregister(v)
 		})
 	}
 }

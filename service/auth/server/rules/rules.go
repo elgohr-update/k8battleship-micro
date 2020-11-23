@@ -6,13 +6,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/micro/go-micro/v3/auth"
-	gostore "github.com/micro/go-micro/v3/store"
-	"github.com/micro/micro/v3/internal/namespace"
-	pb "github.com/micro/micro/v3/service/auth/proto"
+	"github.com/micro/micro/v3/internal/auth/namespace"
+	pb "github.com/micro/micro/v3/proto/auth"
+	"github.com/micro/micro/v3/service/auth"
 	"github.com/micro/micro/v3/service/errors"
 	"github.com/micro/micro/v3/service/logger"
 	"github.com/micro/micro/v3/service/store"
+	gostore "github.com/micro/micro/v3/service/store"
 )
 
 const (
@@ -195,7 +195,7 @@ func (r *Rules) List(ctx context.Context, req *pb.ListRequest, rsp *pb.ListRespo
 	prefix := strings.Join([]string{storePrefixRules, req.Options.Namespace, ""}, joinKey)
 	recs, err := store.DefaultStore.Read(prefix, gostore.ReadPrefix())
 	if err != nil {
-		return errors.InternalServerError("auth.Ruls.List", "Unable to read from store: %v", err)
+		return errors.InternalServerError("auth.Rules.List", "Unable to read from store: %v", err)
 	}
 
 	// unmarshal the records
@@ -203,7 +203,7 @@ func (r *Rules) List(ctx context.Context, req *pb.ListRequest, rsp *pb.ListRespo
 	for _, rec := range recs {
 		var r *pb.Rule
 		if err := json.Unmarshal(rec.Value, &r); err != nil {
-			return errors.InternalServerError("auth.Ruls.List", "Error to unmarshaling json: %v. Value: %v", err, string(rec.Value))
+			return errors.InternalServerError("auth.Rules.List", "Error to unmarshaling json: %v. Value: %v", err, string(rec.Value))
 		}
 		rsp.Rules = append(rsp.Rules, r)
 	}
